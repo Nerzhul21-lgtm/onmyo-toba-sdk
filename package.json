@@ -1,0 +1,38 @@
+{
+  "name": "onmyo-toba-sdk",
+  "version": "1.0.0",
+  "description": "Official SDK for building AI bots and agents on Onmyō Toba prediction markets — Injective blockchain",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "mcp": "node mcp-server.js",
+    "example:basic": "node examples/basic-bot.js",
+    "example:stream": "node examples/streaming-bot.js",
+    "example:authz": "node examples/authz-bot.js"
+  },
+  "keywords": [
+    "injective",
+    "prediction-market",
+    "onmyo-toba",
+    "ai-agent",
+    "shikigami",
+    "cosmwasm",
+    "mcp",
+    "bot",
+    "sdk"
+  ],
+  "author": "Onmyō Toba",
+  "license": "MIT",
+  "dependencies": {
+    "@injectivelabs/sdk-ts": "^1.14.24",
+    "@injectivelabs/networks": "^1.14.24",
+    "@injectivelabs/utils": "^1.14.24",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "axios": "^1.7.0",
+    "ws": "^8.18.0",
+    "dotenv": "^16.4.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
