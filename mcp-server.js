@@ -3,13 +3,13 @@
  * Onmyō Toba MCP Server
  *
  * Exposes all SDK functions as MCP tools so that AI agents
- * (Claude Desktop, Cursor, LangChain, CrewAI) can interact with
- * Onmyō Toba prediction markets using natural language.
+ * (Claude Desktop, Cursor, LangChain, CrewAI, GPT-4, Gemini, Ollama)
+ * can interact with Onmyō Toba prediction markets using natural language.
  *
  * Usage:
  *   node mcp-server.js
  *
- * Add to Claude Desktop config:
+ * Add to Claude Desktop config (~/.config/Claude/claude_desktop_config.json):
  *   {
  *     "mcpServers": {
  *       "onmyo-toba": {
@@ -17,11 +17,13 @@
  *         "args": ["/path/to/onmyo-toba-sdk/mcp-server.js"],
  *         "env": {
  *           "ONMYO_NETWORK": "testnet",
- *           "ONMYO_MNEMONIC": "your mnemonic here (optional — for betting)"
+ *           "ONMYO_MNEMONIC": "your twelve or twenty four word mnemonic here"
  *         }
  *       }
  *     }
  *   }
+ *
+ * For LangChain / other LLMs use shikigami-agent.py template instead.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -46,12 +48,17 @@ import {
   getSpiritVaultBalance,
 } from './query.js'
 
-import { bet, claimWinnings, createMarket, batchClaimWinnings, getAddressFromMnemonic } from './execute.js'
+import { bet, claimWinnings, createMarket, batchClaimWinnings, getAddressFromMnemonic, executeContract } from './execute.js'
 import { grantAuthZ, revokeAuthZ, checkAuthZGrant } from './authz.js'
 import { parseMeta } from './meta.js'
 
 const NETWORK = process.env.ONMYO_NETWORK || 'testnet'
 const MNEMONIC = process.env.ONMYO_MNEMONIC || ''
+
+// Shikigami registry contract address
+const SHIKIGAMI_REGISTRY = NETWORK === 'mainnet'
+  ? ''  // fill in when mainnet deploys
+  : 'inj12kvlyuut5wja82w4qrwvsgm8qhqx924cfqj7xz'
 
 // ── Tool Definitions ──────────────────────────────────────────────────────────
 
@@ -171,6 +178,70 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
 
+  // ── Shikigami tools ──────────────────────────────────────────────────────────
+  {
+    name: 'get_shikigami',
+    description: 'Get the Shikigami profile for a wallet — level, name, profit, risk style, categories, bot wallet',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        owner: { type: 'string', description: 'Injective wallet address that owns the Shikigami (inj1...)' },
+      },
+      required: ['owner'],
+    },
+  },
+  {
+    name: 'get_shikigami_next_level',
+    description: 'Get how much profit is needed for the Shikigami to level up to the next tier',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        owner: { type: 'string', description: 'Injective wallet address that owns the Shikigami' },
+      },
+      required: ['owner'],
+    },
+  },
+  {
+    name: 'get_shikigami_leaderboard',
+    description: 'Get the weekly Shikigami leaderboard — top performing strategy bots by weekly profit',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Number of entries to return (default 20)' },
+      },
+    },
+  },
+  {
+    name: 'update_bot_wallet',
+    description: 'Register or update the bot wallet address on your Shikigami profile. This links your trading bot wallet to your on-chain Shikigami identity. Requires ONMYO_MNEMONIC (owner wallet).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bot_wallet: {
+          type: 'string',
+          description: 'The Injective address of your trading bot wallet (inj1...). Pass null to remove.',
+        },
+      },
+    },
+  },
+  {
+    name: 'update_shikigami_strategy',
+    description: 'Update your Shikigami\'s public strategy description, categories, or risk style shown on the marketplace. Requires ONMYO_MNEMONIC.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        strategy_description: { type: 'string', description: 'Short description of your trading strategy (max 120 chars)' },
+        risk_style: { type: 'string', enum: ['conservative', 'balanced', 'aggressive'], description: 'Risk style' },
+        categories: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Market categories to focus on: Crypto, Sports, Politics, AI, Economics, Weather',
+        },
+        is_active: { type: 'boolean', description: 'Whether your Shikigami is currently active and trading' },
+      },
+    },
+  },
+
   // ── Write tools (require ONMYO_MNEMONIC) ────────────────────────────────────
   {
     name: 'bet',
@@ -230,18 +301,11 @@ const TOOLS = [
 // ── MCP Server ────────────────────────────────────────────────────────────────
 
 const server = new Server(
-  {
-    name: 'onmyo-toba',
-    version: '1.0.0',
-  },
-  {
-    capabilities: { tools: {} },
-  }
+  { name: 'onmyo-toba', version: '1.1.0' },
+  { capabilities: { tools: {} } }
 )
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS,
-}))
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params
@@ -331,6 +395,61 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break
       }
 
+      // ── Shikigami ──────────────────────────────────────────────────────────
+      case 'get_shikigami': {
+        const REST = NETWORK === 'mainnet'
+          ? 'https://sentry.lcd.injective.network'
+          : 'https://testnet.sentry.lcd.injective.network'
+        const res = await fetch(`${REST}/cosmwasm/wasm/v1/contract/${SHIKIGAMI_REGISTRY}/smart/${Buffer.from(JSON.stringify({ get_shikigami: { owner: args.owner } })).toString('base64')}`)
+        const data = await res.json()
+        result = data.data || data
+        break
+      }
+
+      case 'get_shikigami_next_level': {
+        const REST = NETWORK === 'mainnet'
+          ? 'https://sentry.lcd.injective.network'
+          : 'https://testnet.sentry.lcd.injective.network'
+        const res = await fetch(`${REST}/cosmwasm/wasm/v1/contract/${SHIKIGAMI_REGISTRY}/smart/${Buffer.from(JSON.stringify({ next_level_threshold: { owner: args.owner } })).toString('base64')}`)
+        const data = await res.json()
+        result = data.data || data
+        break
+      }
+
+      case 'get_shikigami_leaderboard': {
+        const REST = NETWORK === 'mainnet'
+          ? 'https://sentry.lcd.injective.network'
+          : 'https://testnet.sentry.lcd.injective.network'
+        const res = await fetch(`${REST}/cosmwasm/wasm/v1/contract/${SHIKIGAMI_REGISTRY}/smart/${Buffer.from(JSON.stringify({ weekly_leaderboard: { limit: args.limit || 20 } })).toString('base64')}`)
+        const data = await res.json()
+        result = data.data || data
+        break
+      }
+
+      case 'update_bot_wallet': {
+        if (!MNEMONIC) throw new Error('ONMYO_MNEMONIC not configured. This must be your OWNER wallet mnemonic, not the bot wallet.')
+        const txHash = await executeContract(
+          SHIKIGAMI_REGISTRY,
+          { update_bot_wallet: { bot_wallet: args.bot_wallet || null } },
+          MNEMONIC,
+          opts
+        )
+        result = { success: true, txHash, bot_wallet: args.bot_wallet || null }
+        break
+      }
+
+      case 'update_shikigami_strategy': {
+        if (!MNEMONIC) throw new Error('ONMYO_MNEMONIC not configured.')
+        const msg = { update_strategy: {} }
+        if (args.strategy_description !== undefined) msg.update_strategy.strategy_description = args.strategy_description
+        if (args.risk_style !== undefined) msg.update_strategy.risk_style = args.risk_style
+        if (args.categories !== undefined) msg.update_strategy.categories = args.categories
+        if (args.is_active !== undefined) msg.update_strategy.is_active = args.is_active
+        const txHash = await executeContract(SHIKIGAMI_REGISTRY, msg, MNEMONIC, opts)
+        result = { success: true, txHash }
+        break
+      }
+
       // ── Write ──────────────────────────────────────────────────────────────
       case 'bet': {
         if (!MNEMONIC) throw new Error('ONMYO_MNEMONIC not configured. Set it in the MCP server env.')
@@ -377,4 +496,4 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 const transport = new StdioServerTransport()
 await server.connect(transport)
-console.error(`[Onmyo MCP] Server running on ${NETWORK}`)
+console.error(`[Onmyo MCP] Server running on ${NETWORK} | Shikigami registry: ${SHIKIGAMI_REGISTRY}`)
